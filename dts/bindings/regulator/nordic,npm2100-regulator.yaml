@@ -60,12 +60,22 @@ child-binding:
       description: |
         Regulator mode controlled by specified regulator GPIO pin.
 
+    ldosw-wd-reset:
+      type: boolean
+      description: |
+        LDOSW turned off by watchdog reset.
+
     dps-timer-us:
       type: int
       description: |
-        Interval between DPS pulses in microseconds
+        Interval between DPS refresh cycles in microseconds.
       enum:
         - 100
         - 200
         - 400
         - 800
+
+    dps-pulse-limit:
+      type: int
+      description: |
+        DPS coil pulse limit per refresh cycle.

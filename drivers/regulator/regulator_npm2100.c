@@ -23,6 +23,7 @@ enum npm2100_sources {
 #define BOOST_VOUT     0x22U
 #define BOOST_VOUTSEL  0x23U
 #define BOOST_OPER     0x24U
+#define BOOST_LIMIT    0x26U
 #define BOOST_GPIO     0x28U
 #define BOOST_PIN      0x29U
 #define BOOST_CTRLSET  0x2AU
@@ -38,30 +39,42 @@ enum npm2100_sources {
 #define BOOST_VSET0    0x36U
 #define BOOST_VSET1    0x37U
 
-#define LDOSW_VOUT   0x64U
-#define LDOSW_ENABLE 0x65U
-#define LDOSW_SEL    0x66U
-#define LDOSW_GPIO   0x67U
-#define LDOSW_PRGOCP 0x6BU
+#define LDOSW_VOUT   0x68U
+#define LDOSW_ENABLE 0x69U
+#define LDOSW_SEL    0x6AU
+#define LDOSW_GPIO   0x6BU
+#define LDOSW_STATUS 0x6EU
+#define LDOSW_PRGOCP 0x6FU
 
 #define SHIP_TASK_SHIP 0xC0U
 
-#define RESET_WRITESTICKY  0xDAU
-#define RESET_STROBESTICKY 0xDBU
+#define RESET_ALTCONFIG    0xD6U
+#define RESET_WRITESTICKY  0xDBU
+#define RESET_STROBESTICKY 0xDCU
 
-#define BOOST_OPER_MODE_MASK 0x07U
-#define BOOST_OPER_MODE_AUTO 0x00U
-#define BOOST_OPER_MODE_HP   0x01U
-#define BOOST_OPER_MODE_LP   0x02U
-#define BOOST_OPER_MODE_PASS 0x03U
-#define BOOST_OPER_MODE_NOHP 0x04U
-#define BOOST_OPER_MODE_DPS  0x08U
-#define BOOST_OPER_TIME_MASK 0x30U
+#define BOOST_OPER_MODE_MASK     0x07U
+#define BOOST_OPER_MODE_AUTO     0x00U
+#define BOOST_OPER_MODE_HP       0x01U
+#define BOOST_OPER_MODE_LP       0x02U
+#define BOOST_OPER_MODE_PASS     0x03U
+#define BOOST_OPER_MODE_NOHP     0x04U
+#define BOOST_OPER_DPS_MASK      0x18U
+#define BOOST_OPER_DPS_DISABLE   0x00U
+#define BOOST_OPER_DPS_ALLOW     0x01U
+#define BOOST_OPER_DPS_ALLOWLP   0x02U
+#define BOOST_OPER_DPSTIMER_MASK 0x60U
 
 #define BOOST_PIN_FORCE_HP   0x00U
 #define BOOST_PIN_FORCE_LP   0x01U
-#define BOOST_PIN_FORCE_PASS 0x03U
-#define BOOST_PIN_FORCE_NOHP 0x04U
+#define BOOST_PIN_FORCE_PASS 0x02U
+#define BOOST_PIN_FORCE_NOHP 0x03U
+
+#define BOOST_STATUS0_MODE_MASK 0x07U
+#define BOOST_STATUS0_MODE_HP   0x00U
+#define BOOST_STATUS0_MODE_LP   0x01U
+#define BOOST_STATUS0_MODE_ULP  0x02U
+#define BOOST_STATUS0_MODE_PT   0x03U
+#define BOOST_STATUS0_MODE_DPS  0x04U
 
 #define BOOST_STATUS1_VSET_MASK 0x40U
 
@@ -78,6 +91,14 @@ enum npm2100_sources {
 #define LDOSW_GPIO_PININACT_OFF 0x00U
 #define LDOSW_GPIO_PININACT_ULP 0x10U
 
+#define LDOSW_STATUS_LDO 0x01U
+#define LDOSW_STATUS_SW  0x02U
+#define LDOSW_STATUS_HP  0x04U
+#define LDOSW_STATUS_ULP 0x08U
+#define LDOSW_STATUS_OCP 0x10U
+
+#define RESET_ALTCONFIG_LDOSW_OFF 0x01U
+
 struct regulator_npm2100_pconfig {
 	struct i2c_dt_spec i2c;
 	struct gpio_dt_spec dvs_state_pins[2];
@@ -88,7 +109,9 @@ struct regulator_npm2100_config {
 	struct i2c_dt_spec i2c;
 	uint8_t source;
 	struct gpio_dt_spec mode_gpios;
+	bool ldosw_wd_reset;
 	uint8_t dps_timer;
+	uint8_t dps_pulse_limit;
 };
 
 struct regulator_npm2100_data {
@@ -326,7 +349,6 @@ static int set_boost_mode(const struct device *dev, regulator_mode_t mode)
 {
 	const struct regulator_npm2100_config *config = dev->config;
 	uint8_t reg;
-	int ret;
 
 	/* Normal mode */
 	switch (mode & NPM2100_REG_OPER_MASK) {
@@ -349,13 +371,18 @@ static int set_boost_mode(const struct device *dev, regulator_mode_t mode)
 		return -ENOTSUP;
 	}
 
-	/* Configure DPS mode and timer */
-	if ((mode & NPM2100_REG_DPS_EN) != 0) {
-		reg |= BOOST_OPER_MODE_DPS;
-		reg |= FIELD_PREP(BOOST_OPER_TIME_MASK, config->dps_timer);
+	/* Configure DPS mode */
+	if ((mode & NPM2100_REG_DPS_MASK) != 0) {
+		uint8_t dps_val = (mode & NPM2100_REG_DPS_MASK) == NPM2100_REG_DPS_ALLOW
+					  ? BOOST_OPER_DPS_ALLOW
+					  : BOOST_OPER_DPS_ALLOWLP;
+
+		reg |= FIELD_PREP(BOOST_OPER_DPS_MASK, dps_val);
 	}
 
-	ret = i2c_reg_write_byte_dt(&config->i2c, BOOST_OPER, reg);
+	/* Update mode and dps fields, but not dpstimer */
+	int ret = i2c_reg_update_byte_dt(&config->i2c, BOOST_OPER,
+					 BOOST_OPER_MODE_MASK | BOOST_OPER_DPS_MASK, reg);
 	if (ret < 0) {
 		return ret;
 	}
@@ -386,6 +413,68 @@ static int set_boost_mode(const struct device *dev, regulator_mode_t mode)
 	}
 
 	return i2c_reg_write_byte_dt(&config->i2c, BOOST_PIN, reg);
+}
+
+static int get_boost_mode(const struct device *dev, regulator_mode_t *mode)
+{
+	const struct regulator_npm2100_config *config = dev->config;
+	uint8_t reg;
+	int ret;
+
+	ret = i2c_reg_read_byte_dt(&config->i2c, BOOST_STATUS0, &reg);
+	if (ret < 0) {
+		return ret;
+	}
+
+	switch (reg & BOOST_STATUS0_MODE_MASK) {
+	case BOOST_STATUS0_MODE_HP:
+		*mode = NPM2100_REG_OPER_HP;
+		break;
+	case BOOST_STATUS0_MODE_LP:
+		*mode = NPM2100_REG_OPER_LP;
+		break;
+	case BOOST_STATUS0_MODE_ULP:
+		*mode = NPM2100_REG_OPER_ULP;
+		break;
+	case BOOST_STATUS0_MODE_PT:
+		*mode = NPM2100_REG_OPER_PASS;
+		break;
+	case BOOST_STATUS0_MODE_DPS:
+		/* STATUS0 indicates whether DPS is enabled, regardless of ALLOW/ALLOWLP setting.
+		 * BOOST_OPER_DPS_ALLOW chosen instead of creating new enum value.
+		 */
+		*mode = BOOST_OPER_DPS_ALLOW;
+		break;
+	default:
+		return -ENOTSUP;
+	}
+
+	return 0;
+}
+
+static int get_ldosw_mode(const struct device *dev, regulator_mode_t *mode)
+{
+	const struct regulator_npm2100_config *config = dev->config;
+	uint8_t reg;
+	int ret;
+
+	ret = i2c_reg_read_byte_dt(&config->i2c, LDOSW_STATUS, &reg);
+	if (ret < 0) {
+		return ret;
+	}
+
+	*mode = 0U;
+	if (reg & LDOSW_STATUS_SW) {
+		*mode |= NPM2100_REG_LDSW_EN;
+	}
+
+	if (reg & LDOSW_STATUS_HP) {
+		*mode |= NPM2100_REG_OPER_HP;
+	} else if (reg & LDOSW_STATUS_ULP) {
+		*mode |= NPM2100_REG_OPER_ULP;
+	}
+
+	return 0;
 }
 
 static int set_ldosw_gpio_mode(const struct device *dev, uint8_t inact, uint8_t act, uint8_t ldsw)
@@ -459,6 +548,20 @@ static int regulator_npm2100_set_mode(const struct device *dev, regulator_mode_t
 		return set_boost_mode(dev, mode);
 	case NPM2100_SOURCE_LDOSW:
 		return set_ldosw_mode(dev, mode);
+	default:
+		return -ENOTSUP;
+	}
+}
+
+static int regulator_npm2100_get_mode(const struct device *dev, regulator_mode_t *mode)
+{
+	const struct regulator_npm2100_config *config = dev->config;
+
+	switch (config->source) {
+	case NPM2100_SOURCE_BOOST:
+		return get_boost_mode(dev, mode);
+	case NPM2100_SOURCE_LDOSW:
+		return get_ldosw_mode(dev, mode);
 	default:
 		return -ENOTSUP;
 	}
@@ -600,7 +703,28 @@ static int regulator_npm2100_init(const struct device *dev)
 
 	/* BOOST is always enabled */
 	if (config->source == NPM2100_SOURCE_BOOST) {
+		ret = i2c_reg_write_byte_dt(
+			&config->i2c, BOOST_OPER,
+			FIELD_PREP(BOOST_OPER_DPSTIMER_MASK, config->dps_timer));
+		if (ret < 0) {
+			return ret;
+		}
+
+		ret = i2c_reg_write_byte_dt(&config->i2c, BOOST_LIMIT, config->dps_pulse_limit);
+		if (ret < 0) {
+			return ret;
+		}
+
 		return regulator_common_init(dev, true);
+	}
+
+	/* Configure LDOSW behavior during watchdog reset */
+	if (config->ldosw_wd_reset) {
+		ret = i2c_reg_write_byte_dt(&config->i2c, RESET_ALTCONFIG,
+					    RESET_ALTCONFIG_LDOSW_OFF);
+		if (ret < 0) {
+			return ret;
+		}
 	}
 
 	/* Get enable state for LDOSW */
@@ -624,7 +748,8 @@ static const struct regulator_driver_api api = {
 	.count_current_limits = regulator_npm2100_count_currents,
 	.list_current_limit = regulator_npm2100_list_currents,
 	.set_current_limit = regulator_npm2100_set_current,
-	.set_mode = regulator_npm2100_set_mode};
+	.set_mode = regulator_npm2100_set_mode,
+	.get_mode = regulator_npm2100_get_mode};
 
 #define REGULATOR_NPM2100_DEFINE(node_id, id, _source)                                             \
 	static struct regulator_npm2100_data data_##id;                                            \
@@ -633,8 +758,13 @@ static const struct regulator_driver_api api = {
 		.common = REGULATOR_DT_COMMON_CONFIG_INIT(node_id),                                \
 		.i2c = I2C_DT_SPEC_GET(DT_GPARENT(node_id)),                                       \
 		.source = _source,                                                                 \
+		.mode_gpios = GPIO_DT_SPEC_GET_OR(node_id, mode_gpios, {0}),                       \
+		.ldosw_wd_reset = DT_PROP(node_id, ldosw_wd_reset),                                \
 		.dps_timer = DT_ENUM_IDX_OR(node_id, dps_timer_us, 0),                             \
-		.mode_gpios = GPIO_DT_SPEC_GET_OR(node_id, mode_gpios, {0})};                      \
+		.dps_pulse_limit = DT_PROP_OR(node_id, dps_pulse_limit, 0)};                       \
+	BUILD_ASSERT(DT_PROP_OR(node_id, dps_pulse_limit, 0) >= 3 ||                               \
+			     DT_PROP_OR(node_id, dps_pulse_limit, 0) == 0,                         \
+		     "Invalid dps_pulse_limit value");                                             \
                                                                                                    \
 	DEVICE_DT_DEFINE(node_id, regulator_npm2100_init, NULL, &data_##id, &config_##id,          \
 			 POST_KERNEL, CONFIG_REGULATOR_NPM2100_INIT_PRIORITY, &api);
