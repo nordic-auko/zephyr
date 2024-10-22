@@ -22,7 +22,7 @@ extern "C" {
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 
-enum mfd_npm2100_event_t {
+enum mfd_npm2100_event {
 	NPM2100_EVENT_SYS_DIETEMP_WARN,
 	NPM2100_EVENT_SYS_SHIPHOLD_FALL,
 	NPM2100_EVENT_SYS_SHIPHOLD_RISE,
@@ -47,16 +47,37 @@ enum mfd_npm2100_event_t {
 	NPM2100_EVENT_MAX
 };
 
+enum mfd_npm2100_timer_mode {
+	NPM2100_TIMER_MODE_GENERAL_PURPOSE,
+	NPM2100_TIMER_MODE_WDT_RESET,
+	NPM2100_TIMER_MODE_WDT_POWER_CYCLE,
+	NPM2100_TIMER_MODE_WAKEUP,
+};
+
 /**
  * @brief Write npm2100 timer register
  *
+ * The timer tick resolution is 1/64 seconds.
+ * This function does not start the timer (see mfd_npm2100_start_timer()).
+ *
  * @param dev npm2100 mfd device
  * @param time_ms timer value in ms
+ * @param mode timer mode
  * @retval 0 If successful
  * @retval -EINVAL if time value is too large
  * @retval -errno In case of any bus error (see i2c_write_dt())
  */
-int mfd_npm2100_set_timer(const struct device *dev, uint32_t time_ms);
+int mfd_npm2100_set_timer(const struct device *dev, uint32_t time_ms,
+			  enum mfd_npm2100_timer_mode mode);
+
+/**
+ * @brief Start npm2100 timer
+ *
+ * @param dev npm2100 mfd device
+ * @retval 0 If successful
+ * @retval -errno In case of any bus error (see i2c_write_dt())
+ */
+int mfd_npm2100_start_timer(const struct device *dev);
 
 /**
  * @brief npm2100 full power reset
@@ -80,6 +101,18 @@ int mfd_npm2100_reset(const struct device *dev);
  * @retval -errno In case of any bus error (see i2c_write_dt())
  */
 int mfd_npm2100_hibernate(const struct device *dev, uint32_t time_ms);
+
+/**
+ * @brief npm2100 ship mode
+ *
+ * Enters ship mode, which is the lowest power state.
+ * Exit from this state via "shphld" pin signal, or power cycle.
+ *
+ * @param dev npm2100 mfd device
+ * @retval 0 If successful
+ * @retval -errno In case of any bus error (see i2c_write_dt())
+ */
+int mfd_npm2100_shipmode(const struct device *dev);
 
 /**
  * @brief Add npm2100 event callback

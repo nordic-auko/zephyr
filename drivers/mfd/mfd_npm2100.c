@@ -23,19 +23,37 @@
 #define TIMER_CONFIG          0xB3U
 #define TIMER_TARGET          0xB4U
 #define TIMER_STATUS          0xB7U
+#define SHPHLD_TASKS_SHIP     0xC0U
+#define SHPHLD_WAKEUP         0xC1U
+#define SHPHLD_SHPHLD         0xC2U
 #define HIBERNATE_TASKS_HIBER 0xC8U
 #define RESET_TASKS_RESET     0xD0U
 #define RESET_BUTTON          0xD2U
 #define RESET_PIN             0xD3U
-#define RESET_WRITESTICKY     0xDAU
-#define RESET_STROBESTICKY    0xDBU
+#define RESET_WRITESTICKY     0xDBU
+#define RESET_STROBESTICKY    0xDCU
+
+#define TASKS_SHIP_ENTER 0x01U
+
+#define SHPHLD_RESISTOR_MASK     0x03U
+#define SHPHLD_RESISTOR_PULLUP   0x00U
+#define SHPHLD_RESISTOR_NONE     0x01U
+#define SHPHLD_RESISTOR_PULLDOWN 0x02U
+#define SHPHLD_CURR_MASK         0x0CU
+#define SHPHLD_PULL_ENABLE       0x10U
+
+#define WAKEUP_EDGE_FALLING    0x00U
+#define WAKEUP_EDGE_RISING     0x01U
+#define WAKEUP_HIBERNATE_PIN   0x00U
+#define WAKEUP_HIBERNATE_NOPIN 0x02U
 
 #define TIMER_CONFIG_WKUP 3U
 
 #define TIMER_STATUS_IDLE 0U
 
-#define TIMER_PRESCALER_MS 16U
-#define TIMER_MAX          0xFFFFFFU
+#define TIMER_PRESCALER_MUL 64ULL
+#define TIMER_PRESCALER_DIV 1000ULL
+#define TIMER_MAX           0xFFFFFFU
 
 #define EVENTS_SIZE 5U
 
@@ -54,7 +72,10 @@ struct mfd_npm2100_config {
 	struct gpio_dt_spec host_int_gpios;
 	gpio_pin_t pmic_int_pin;
 	gpio_flags_t pmic_int_flags;
+	gpio_flags_t shiphold_flags;
 	uint8_t shiphold_longpress;
+	uint8_t shiphold_current;
+	uint8_t shiphold_hibernate_wakeup;
 };
 
 struct mfd_npm2100_data {
@@ -155,17 +176,11 @@ static int config_pmic_int(const struct device *dev)
 				     GPIO_CONFIG_OUTPUT);
 }
 
-static int mfd_npm2100_init(const struct device *dev)
+static int config_shphold(const struct device *dev)
 {
 	const struct mfd_npm2100_config *config = dev->config;
-	struct mfd_npm2100_data *mfd_data = dev->data;
+	uint8_t reg;
 	int ret;
-
-	if (!i2c_is_ready_dt(&config->i2c)) {
-		return -ENODEV;
-	}
-
-	mfd_data->dev = dev;
 
 	if (config->shiphold_longpress != SHPHLD_LONGPRESS_SHIP) {
 		ret = i2c_reg_write_byte_dt(&config->i2c, RESET_WRITESTICKY, RESET_STICKY_PWRBUT);
@@ -189,6 +204,48 @@ static int mfd_npm2100_init(const struct device *dev)
 				return ret;
 			}
 		}
+	}
+
+	reg = config->shiphold_hibernate_wakeup ? WAKEUP_HIBERNATE_PIN : WAKEUP_HIBERNATE_NOPIN;
+	if ((config->shiphold_flags & GPIO_ACTIVE_HIGH) != 0U) {
+		reg |= WAKEUP_EDGE_RISING;
+	}
+
+	ret = i2c_reg_write_byte_dt(&config->i2c, SHPHLD_WAKEUP, reg);
+	if (ret < 0) {
+		return ret;
+	}
+
+	if ((config->shiphold_flags & GPIO_PULL_UP) != 0U) {
+		reg = SHPHLD_RESISTOR_PULLUP;
+	} else if ((config->shiphold_flags & GPIO_PULL_DOWN) != 0U) {
+		reg = SHPHLD_RESISTOR_PULLDOWN;
+	} else {
+		reg = SHPHLD_RESISTOR_NONE;
+	}
+	if (config->shiphold_current != 0U) {
+		reg |= FIELD_PREP(SHPHLD_CURR_MASK, (config->shiphold_current - 1U));
+		reg |= SHPHLD_PULL_ENABLE;
+	}
+
+	return i2c_reg_write_byte_dt(&config->i2c, SHPHLD_SHPHLD, reg);
+}
+
+static int mfd_npm2100_init(const struct device *dev)
+{
+	const struct mfd_npm2100_config *config = dev->config;
+	struct mfd_npm2100_data *mfd_data = dev->data;
+	int ret;
+
+	if (!i2c_is_ready_dt(&config->i2c)) {
+		return -ENODEV;
+	}
+
+	mfd_data->dev = dev;
+
+	ret = config_shphold(dev);
+	if (ret < 0) {
+		return ret;
 	}
 
 	if (config->host_int_gpios.port == NULL) {
@@ -222,19 +279,44 @@ static int mfd_npm2100_init(const struct device *dev)
 	return gpio_pin_interrupt_configure_dt(&config->host_int_gpios, GPIO_INT_EDGE_TO_ACTIVE);
 }
 
-int mfd_npm2100_set_timer(const struct device *dev, uint32_t time_ms)
+int mfd_npm2100_set_timer(const struct device *dev, uint32_t time_ms,
+			  enum mfd_npm2100_timer_mode mode)
 {
 	const struct mfd_npm2100_config *config = dev->config;
 	uint8_t buff[4] = {TIMER_TARGET};
-	uint32_t ticks = time_ms / TIMER_PRESCALER_MS;
+	uint32_t ticks = (uint32_t)DIV_ROUND_CLOSEST(((uint64_t)time_ms * TIMER_PRESCALER_MUL),
+						     TIMER_PRESCALER_DIV);
+	uint8_t timer_status;
+	int ret;
 
 	if (ticks > TIMER_MAX) {
 		return -EINVAL;
 	}
 
+	ret = i2c_reg_read_byte_dt(&config->i2c, TIMER_STATUS, &timer_status);
+	if (ret < 0) {
+		return ret;
+	}
+
+	if (timer_status != TIMER_STATUS_IDLE) {
+		return -EBUSY;
+	}
+
 	sys_put_be24(ticks, &buff[1]);
 
-	return i2c_write_dt(&config->i2c, buff, sizeof(buff));
+	ret = i2c_write_dt(&config->i2c, buff, sizeof(buff));
+	if (ret < 0) {
+		return ret;
+	}
+
+	return i2c_reg_write_byte_dt(&config->i2c, TIMER_CONFIG, mode);
+}
+
+int mfd_npm2100_start_timer(const struct device *dev)
+{
+	const struct mfd_npm2100_config *config = dev->config;
+
+	return i2c_reg_write_byte_dt(&config->i2c, TIMER_TASKS_START, 1U);
 }
 
 int mfd_npm2100_reset(const struct device *dev)
@@ -250,28 +332,12 @@ int mfd_npm2100_hibernate(const struct device *dev, uint32_t time_ms)
 	int ret;
 
 	if (time_ms > 0) {
-		uint8_t timer_status;
-
-		ret = i2c_reg_read_byte_dt(&config->i2c, TIMER_STATUS, &timer_status);
+		ret = mfd_npm2100_set_timer(dev, time_ms, NPM2100_TIMER_MODE_WAKEUP);
 		if (ret < 0) {
 			return ret;
 		}
 
-		if (timer_status != TIMER_STATUS_IDLE) {
-			return -EBUSY;
-		}
-
-		ret = mfd_npm2100_set_timer(dev, time_ms);
-		if (ret < 0) {
-			return ret;
-		}
-
-		ret = i2c_reg_write_byte_dt(&config->i2c, TIMER_CONFIG, TIMER_CONFIG_WKUP);
-		if (ret < 0) {
-			return ret;
-		}
-
-		ret = i2c_reg_write_byte_dt(&config->i2c, TIMER_TASKS_START, 1U);
+		ret = mfd_npm2100_start_timer(dev);
 		if (ret < 0) {
 			return ret;
 		}
@@ -289,6 +355,13 @@ int mfd_npm2100_hibernate(const struct device *dev, uint32_t time_ms)
 	}
 
 	return i2c_reg_write_byte_dt(&config->i2c, HIBERNATE_TASKS_HIBER, 1U);
+}
+
+int mfd_npm2100_shipmode(const struct device *dev)
+{
+	const struct mfd_npm2100_config *config = dev->config;
+
+	return i2c_reg_write_byte_dt(&config->i2c, SHPHLD_TASKS_SHIP, TASKS_SHIP_ENTER);
 }
 
 int mfd_npm2100_add_callback(const struct device *dev, struct gpio_callback *callback)
@@ -333,7 +406,11 @@ int mfd_npm2100_remove_callback(const struct device *dev, struct gpio_callback *
 		.host_int_gpios = GPIO_DT_SPEC_INST_GET_OR(inst, host_int_gpios, {0}),             \
 		.pmic_int_pin = DT_INST_PROP_OR(inst, pmic_int_pin, 0),                            \
 		.pmic_int_flags = DT_INST_PROP_OR(inst, pmic_int_flags, 0),                        \
+		.shiphold_flags =                                                                  \
+			DT_INST_PROP_OR(inst, shiphold_flags, (GPIO_ACTIVE_LOW | GPIO_PULL_UP)),   \
 		.shiphold_longpress = DT_INST_ENUM_IDX_OR(inst, shiphold_longpress, 0),            \
+		.shiphold_current = DT_INST_ENUM_IDX_OR(inst, shiphold_current, 0),                \
+		.shiphold_hibernate_wakeup = DT_INST_PROP_OR(inst, shiphold_hibernate_wakeup, 0),  \
 	};                                                                                         \
                                                                                                    \
 	DEVICE_DT_INST_DEFINE(inst, mfd_npm2100_init, NULL, &data##inst, &config##inst,            \
