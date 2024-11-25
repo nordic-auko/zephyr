@@ -22,10 +22,6 @@
 #define TIMER_STATUS      0xB7U
 #define TIMER_BOOT_MON    0xB8U
 
-#define TIMER_CONFIG_GEN    0U
-#define TIMER_CONFIG_WDRST  1U
-#define TIMER_CONFIG_WDPWRC 2U
-
 struct wdt_npm2100_config {
 	const struct device *mfd;
 	struct i2c_dt_spec i2c;
@@ -44,7 +40,7 @@ static int wdt_npm2100_setup(const struct device *dev, uint8_t options)
 		return -EINVAL;
 	}
 
-	return i2c_reg_write_byte_dt(&config->i2c, TIMER_TASKS_START, 1U);
+	return mfd_npm2100_start_timer(config->mfd);
 }
 
 static int wdt_npm2100_disable(const struct device *dev)
@@ -79,29 +75,24 @@ static int wdt_npm2100_install_timeout(const struct device *dev,
 		return -EINVAL;
 	}
 
-	ret = mfd_npm2100_set_timer(config->mfd, timeout->window.max);
-	if (ret < 0) {
-		return ret;
-	}
-
 	switch (timeout->flags & WDT_FLAG_RESET_MASK) {
 	case WDT_FLAG_RESET_NONE:
 		/* Watchdog expiry causes event only, and does not reset */
-		mode = TIMER_CONFIG_GEN;
+		mode = NPM2100_TIMER_MODE_GENERAL_PURPOSE;
 		break;
 	case WDT_FLAG_RESET_CPU_CORE:
 		/* Watchdog expiry asserts reset output */
-		mode = TIMER_CONFIG_WDRST;
+		mode = NPM2100_TIMER_MODE_WDT_RESET;
 		break;
 	case WDT_FLAG_RESET_SOC:
 		/* Watchdog expiry causes full power cycle */
-		mode = TIMER_CONFIG_WDPWRC;
+		mode = NPM2100_TIMER_MODE_WDT_POWER_CYCLE;
 		break;
 	default:
 		return -EINVAL;
 	}
 
-	ret = i2c_reg_write_byte_dt(&config->i2c, TIMER_CONFIG, mode);
+	ret = mfd_npm2100_set_timer(config->mfd, timeout->window.max, mode);
 	if (ret < 0) {
 		return ret;
 	}
