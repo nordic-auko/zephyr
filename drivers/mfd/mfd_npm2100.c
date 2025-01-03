@@ -14,23 +14,24 @@
 #include <zephyr/drivers/gpio/gpio_utils.h>
 #include <zephyr/drivers/mfd/npm2100.h>
 
-#define EVENTS_SET            0x00U
-#define EVENTS_CLR            0x05U
-#define INTEN_SET             0x0AU
-#define GPIO_CONFIG           0x80U
-#define GPIO_USAGE            0x83U
-#define TIMER_TASKS_START     0xB0U
-#define TIMER_CONFIG          0xB3U
-#define TIMER_TARGET          0xB4U
-#define TIMER_STATUS          0xB7U
-#define SHPHLD_WAKEUP         0xC1U
-#define SHPHLD_SHPHLD         0xC2U
-#define HIBERNATE_TASKS_HIBER 0xC8U
-#define RESET_TASKS_RESET     0xD0U
-#define RESET_BUTTON          0xD2U
-#define RESET_PIN             0xD3U
-#define RESET_WRITESTICKY     0xDBU
-#define RESET_STROBESTICKY    0xDCU
+#define EVENTS_SET              0x00U
+#define EVENTS_CLR              0x05U
+#define INTEN_SET               0x0AU
+#define GPIO_CONFIG             0x80U
+#define GPIO_USAGE              0x83U
+#define TIMER_TASKS_START       0xB0U
+#define TIMER_CONFIG            0xB3U
+#define TIMER_TARGET            0xB4U
+#define TIMER_STATUS            0xB7U
+#define SHPHLD_WAKEUP           0xC1U
+#define SHPHLD_SHPHLD           0xC2U
+#define HIBERNATE_TASKS_HIBER   0xC8U
+#define HIBERNATE_TASKS_HIBERPT 0xC9U
+#define RESET_TASKS_RESET       0xD0U
+#define RESET_BUTTON            0xD2U
+#define RESET_PIN               0xD3U
+#define RESET_WRITESTICKY       0xDBU
+#define RESET_STROBESTICKY      0xDCU
 
 #define SHPHLD_RESISTOR_MASK     0x03U
 #define SHPHLD_RESISTOR_PULLUP   0x00U
@@ -337,7 +338,7 @@ int mfd_npm2100_reset(const struct device *dev)
 	return i2c_reg_write_byte_dt(&config->i2c, RESET_TASKS_RESET, 1U);
 }
 
-int mfd_npm2100_hibernate(const struct device *dev, uint32_t time_ms)
+int mfd_npm2100_hibernate(const struct device *dev, uint32_t time_ms, bool pass_through)
 {
 	const struct mfd_npm2100_config *config = dev->config;
 	int ret;
@@ -365,7 +366,8 @@ int mfd_npm2100_hibernate(const struct device *dev, uint32_t time_ms)
 		return ret;
 	}
 
-	return i2c_reg_write_byte_dt(&config->i2c, HIBERNATE_TASKS_HIBER, 1U);
+	return i2c_reg_write_byte_dt(
+		&config->i2c, pass_through ? HIBERNATE_TASKS_HIBERPT : HIBERNATE_TASKS_HIBER, 1U);
 }
 
 int mfd_npm2100_add_callback(const struct device *dev, struct gpio_callback *callback)
